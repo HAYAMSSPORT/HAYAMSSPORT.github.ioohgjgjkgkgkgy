@@ -1,0 +1,838 @@
+/**
+ * WebsitesEmbedWidget - A class for handling websites embedded widgets and modal popups
+ * 
+ * This class provides functionality to:
+ * 1. Inject a modal into the parent window
+ * 2. Open the modal with dynamic content (iframe)
+ * 3. Handle form submissions by intercepting them and opening in a modal
+ * 
+ * @author SITE123
+ * @version 1.0.0
+ */
+class WebsitesEmbedWidget {
+    // Static property to store instances by modalId
+    static instances = {};
+
+    /**
+     * Constructor for the WebsitesEmbedWidget class
+     * 
+     * @param {Object} options - Configuration options
+     * @param {string} options.modalId - The ID to use for the modal element
+     * @param {string} options.iframeUrl - The URL to load in the iframe (optional)
+     * @param {string} options.title - The title for the modal (optional, not displayed by default)
+     * @param {string} options.description - The description for the modal (optional, not displayed by default)
+     * @param {boolean} options.showHeader - Whether to show the title and description (default: false)
+     * @param {Function} options.onClose - Callback function when modal is closed (optional)
+     */
+    constructor(options) {
+        // Set default options
+        const defaultOptions = {
+            modalId: 'WebsitesEmbedWidgetModal',
+            iframeUrl: '',
+            title: '',
+            description: '',
+            showHeader: false,
+            onClose: null
+        };
+        
+        // Merge default options with provided options
+        this.options = { ...defaultOptions, ...options };
+        
+        // Check if an instance with this modalId already exists
+        if (WebsitesEmbedWidget.instances[this.options.modalId]) {
+            return WebsitesEmbedWidget.instances[this.options.modalId];
+        }
+        
+        // Store the current domain for URL rewriting
+        this.currentDomain = window.location.origin;
+
+        // Check if we're in an iframe
+        this.isInIframe = window.parent !== window;
+        
+        // Flag to track if we have a local modal
+        this.hasLocalModal = false;
+
+        // Initialize the widget
+        this.init();
+        
+        // Store this instance in the static instances object
+        WebsitesEmbedWidget.instances[this.options.modalId] = this;
+    }
+
+    /**
+     * Initialize the widget
+     */
+    init() {
+        // Inject the modal into the parent window or create a local one
+        this.injectModal();
+
+        // Listen for messages from the parent window
+        this.setupMessageListener();
+    }
+
+    /**
+     * Get an existing instance by modalId
+     * 
+     * @param {string} modalId - The modalId of the instance to retrieve
+     * @returns {WebsitesEmbedWidget|null} - The instance or null if not found
+     */
+    static getInstance(modalId) {
+        return WebsitesEmbedWidget.instances[modalId] || null;
+    }
+
+    /**
+     * Generate the modal HTML template
+     * 
+     * @returns {string} The HTML for the modal
+     */
+    getModalTemplate() {
+        // Create the header HTML only if showHeader is true
+        const headerHTML = this.options.showHeader ? `
+            <h2>${this.options.title}</h2>
+            <p>${this.options.description}</p>
+        ` : '';
+
+        // If we're going to submit a form to this iframe, don't set an initial src
+        // This prevents the duplicate request
+        const iframeSrc = this.pendingFormSubmission ? '' : this.options.iframeUrl;
+
+        return `
+            <div id="${this.options.modalId}" style="
+                display: none; /* Start hidden */
+                position: fixed;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                background-color: rgba(0, 0, 0, 0.5);
+                z-index: 999999;
+            ">
+                <div style="
+                    position: absolute;
+                    top: 50%;
+                    left: 50%;
+                    transform: translate(-50%, -50%);
+                    background-color: white;
+                    width: 80%;
+                    max-width: 1200px;
+                    max-height: 90vh;
+                    border-radius: 5px;
+                    padding: 20px;
+                    display: flex;
+                    flex-direction: column;
+                ">
+                    <span id="${this.options.modalId}Close" style="
+                        position: absolute;
+                        right: 20px;
+                        top: 10px;
+                        cursor: pointer;
+                        font-size: 24px;
+                        z-index: 1;
+                    ">&times;</span>
+                    ${headerHTML}
+                    <div style="flex: 1; overflow: hidden;">
+                        <iframe id="${this.options.modalId}Iframe" name="${this.options.modalId}Iframe" 
+                            ${iframeSrc ? `src="${iframeSrc}"` : ''} 
+                            style="width: 100%; height: 80vh; border: none; display: block;"
+                        ></iframe>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    /**
+     * Inject the modal into the parent window or create a local one if not in iframe
+     */
+    injectModal() {
+        if (this.isInIframe) {
+            // We're in an iframe, try to inject the modal into the parent window
+            window.parent.postMessage({
+                type: 'injectModal',
+                html: this.getModalTemplate(),
+                modalId: this.options.modalId
+            }, '*');
+        } else {
+            // We're not in an iframe, create a local modal
+            this.createLocalModal();
+        }
+    }
+
+    /**
+     * Create a local modal in the current window
+     */
+    createLocalModal() {
+        // Check if the modal already exists
+        if (document.getElementById(this.options.modalId)) {
+            // Modal already exists, just update the iframe URL if needed
+            const iframe = document.getElementById(`${this.options.modalId}Iframe`);
+            if (iframe && this.options.iframeUrl && iframe.src !== this.options.iframeUrl) {
+                iframe.src = this.options.iframeUrl;
+            }
+            return; // Don't recreate the modal
+        }
+        
+        // Create a container and insert the HTML
+        const container = document.createElement('div');
+        container.innerHTML = this.getModalTemplate();
+        document.body.appendChild(container.firstElementChild);
+        
+        // Add event listeners for closing the modal
+        const modal = document.getElementById(this.options.modalId);
+        const closeButton = document.getElementById(`${this.options.modalId}Close`);
+        
+        if (closeButton) {
+            closeButton.addEventListener('click', () => {
+                this.toggleLocalModal(false);
+            });
+        }
+        
+        if (modal) {
+            modal.addEventListener('click', (event) => {
+                if (event.target === modal) {
+                    this.toggleLocalModal(false);
+                }
+            });
+        }
+        
+        // Set flag that we have a local modal
+        this.hasLocalModal = true;
+    }
+
+    /**
+     * Toggle the visibility of a local modal
+     * 
+     * @param {boolean} visible - Whether the modal should be visible
+     */
+    toggleLocalModal(visible) {
+        const modal = document.getElementById(this.options.modalId);
+        if (!modal) return;
+        
+        if (visible) {
+            // Show the modal
+            modal.style.display = 'block';
+        } else {
+            // Hide the modal
+            modal.style.display = 'none';
+            
+            // Call the onClose callback if provided
+            if (typeof this.options.onClose === 'function') {
+                this.options.onClose();
+            }
+        }
+    }
+
+    /**
+     * Add viewModeTXT=clean parameter to URL if it doesn't exist
+     * 
+     * @param {string} url - The URL to modify
+     * @returns {string} - The URL with viewModeTXT=clean parameter added if needed
+     */
+    addViewModeParameter(url) {
+        if (!url) return url;
+        
+        try {
+            // Handle relative URLs by prepending the current domain
+            let fullUrl = url;
+            if (url.startsWith('/')) {
+                // It's a relative URL starting with /
+                fullUrl = this.currentDomain + url;
+            } else if (!url.match(/^https?:\/\//i)) {
+                // It's a relative URL without leading /
+                fullUrl = this.currentDomain + '/' + url;
+            }
+            
+            // Create a URL object to easily manipulate the URL
+            const urlObj = new URL(fullUrl);
+            
+            // Check if viewModeTXT parameter already exists
+            if (!urlObj.searchParams.has('viewModeTXT')) {
+                // Add the viewModeTXT=clean parameter
+                urlObj.searchParams.append('viewModeTXT', 'clean');
+            }
+            
+            // For relative URLs, return just the path and query string
+            if (url.startsWith('/')) {
+                return urlObj.pathname + urlObj.search + urlObj.hash;
+            } else if (!url.match(/^https?:\/\//i)) {
+                return urlObj.pathname.substring(1) + urlObj.search + urlObj.hash;
+            }
+            
+            // Return the modified URL as a string
+            return urlObj.toString();
+        } catch (e) {
+            console.error('Error adding viewModeTXT parameter:', e, 'URL:', url);
+            
+            // Fallback method if URL constructor fails
+            try {
+                // Simple string manipulation as fallback
+                if (url.indexOf('?') !== -1) {
+                    // URL already has parameters
+                    if (url.indexOf('viewModeTXT=') === -1) {
+                        // viewModeTXT parameter doesn't exist
+                        return url + '&viewModeTXT=clean';
+                    }
+                } else {
+                    // URL has no parameters
+                    return url + '?viewModeTXT=clean';
+                }
+            } catch (fallbackError) {
+                console.error('Fallback error:', fallbackError);
+            }
+            
+            // Return original URL if we couldn't modify it
+            return url;
+        }
+    }
+
+    /**
+     * Open the modal
+     * 
+     * @param {string|HTMLFormElement} urlOrForm - The URL to load in the iframe or a form element
+     * @param {Object|null} postParams - Optional POST parameters to send to the URL (not needed if form is provided)
+     */
+    openModal(urlOrForm, postParams = null) {
+        let url = '';
+        let formData = null;
+        let formMethod = 'post';
+        
+        // Check if urlOrForm is a form element or a string
+        if (urlOrForm instanceof HTMLFormElement) {
+            // It's a form element
+            const form = urlOrForm;
+            url = form.getAttribute('action');
+            formData = this.getFormData(form);
+            formMethod = form.method.toLowerCase() || 'post';
+        } else if (typeof urlOrForm === 'string') {
+            // It's a URL string
+            url = urlOrForm;
+            formData = postParams;
+        } else {
+            console.error('Invalid parameter for openModal: expected string or HTMLFormElement');
+            return;
+        }
+        
+        // Add viewModeTXT=clean parameter if it doesn't exist
+        url = this.addViewModeParameter(url);
+        
+        // Rewrite the URL to use the current domain
+        url = this.rewriteUrlToCurrentDomain(url);
+        
+        // Update the iframe URL
+        this.options.iframeUrl = url;
+        
+        // If we have form data, we'll handle the submission differently
+        const hasFormData = formData && Object.keys(formData).length > 0;
+        
+        // Set a flag to indicate we're going to submit a form
+        this.pendingFormSubmission = hasFormData;
+        
+        // If we're in an iframe, handle it differently
+        if (this.isInIframe) {
+            // First, close any existing modal
+            window.parent.postMessage({
+                type: 'closeAndRemoveModal',
+                modalId: this.options.modalId
+            }, '*');
+            
+            // Wait a short time to ensure the modal is removed
+            setTimeout(() => {
+                // Then inject a new modal
+                this.injectModal();
+                
+                // Show the modal
+                window.parent.postMessage({
+                    type: 'toggleModal',
+                    visible: true,
+                    modalId: this.options.modalId
+                }, '*');
+                
+                // If we have form data, submit it
+                if (hasFormData) {
+                    // Add viewModeTXT=clean to form data if it doesn't exist
+                    if (!formData.viewModeTXT) {
+                        formData.viewModeTXT = 'clean';
+                    }
+                    
+                    // For cross-domain URLs, we need to handle the form submission differently
+                    if (this.isCrossDomainUrl(url)) {
+                        this.handleCrossDomainFormSubmission(url, formData, formMethod);
+                    } else {
+                        // For same-domain URLs, we can use the parent handler's submitForm method
+                        setTimeout(() => {
+                            window.parent.postMessage({
+                                type: 'submitForm',
+                                modalId: this.options.modalId,
+                                formAction: url,
+                                formData: formData,
+                                formMethod: formMethod,
+                                targetIframe: `${this.options.modalId}Iframe`
+                            }, '*');
+                        }, 50);
+                    }
+                }
+            }, 100);
+        } else {
+            // We're not in an iframe, handle locally
+            
+            // First, remove any existing modal
+            const existingModal = document.getElementById(this.options.modalId);
+            if (existingModal) {
+                existingModal.parentNode.removeChild(existingModal);
+                this.hasLocalModal = false;
+            }
+            
+            // Create a new modal
+            this.createLocalModal();
+            
+            // Show the modal
+            this.toggleLocalModal(true);
+            
+            // If we have form data, submit it
+            if (hasFormData) {
+                this.handleLocalFormSubmission(url, formData, formMethod);
+            }
+        }
+        
+        // Reset the pending form submission flag
+        setTimeout(() => {
+            this.pendingFormSubmission = false;
+        }, 100);
+    }
+
+    /**
+     * Handle local form submission when not in an iframe
+     * 
+     * @param {string} url - The form action URL
+     * @param {Object} formData - The form data
+     * @param {string} formMethod - The form method (get or post)
+     */
+    handleLocalFormSubmission(url, formData, formMethod) {
+        // Get the iframe
+        const iframe = document.getElementById(`${this.options.modalId}Iframe`);
+        if (!iframe) {
+            console.error('Cannot find iframe for form submission');
+            return;
+        }
+        
+        // Create a form in the current window that will submit to the iframe
+        const form = document.createElement('form');
+        form.style.display = 'none';
+        form.method = formMethod;
+        form.action = url;
+        form.target = `${this.options.modalId}Iframe`;
+        
+        // Add form fields
+        for (const key in formData) {
+            if (formData.hasOwnProperty(key)) {
+                const input = document.createElement('input');
+                input.type = 'hidden';
+                input.name = key;
+                input.value = formData[key];
+                form.appendChild(input);
+            }
+        }
+        
+        // Append the form to the body
+        document.body.appendChild(form);
+        
+        // Submit the form
+        form.submit();
+        
+        // Remove the form after submission
+        setTimeout(() => {
+            document.body.removeChild(form);
+        }, 100);
+    }
+
+    /**
+     * Handle cross-domain form submission
+     * 
+     * @param {string} url - The form action URL
+     * @param {Object} formData - The form data
+     * @param {string} formMethod - The form method (get or post)
+     */
+    handleCrossDomainFormSubmission(url, formData, formMethod) {
+        // Create a form in the current window that will submit to the iframe
+        const form = document.createElement('form');
+        form.style.display = 'none';
+        form.method = formMethod;
+        form.action = url;
+        form.target = `${this.options.modalId}Iframe`;
+        
+        // Add form fields
+        for (const key in formData) {
+            if (formData.hasOwnProperty(key)) {
+                const input = document.createElement('input');
+                input.type = 'hidden';
+                input.name = key;
+                input.value = formData[key];
+                form.appendChild(input);
+            }
+        }
+        
+        // Append the form to the body
+        document.body.appendChild(form);
+        
+        // Submit the form
+        form.submit();
+        
+        // Remove the form after submission
+        setTimeout(() => {
+            document.body.removeChild(form);
+        }, 100);
+    }
+
+    /**
+     * Rewrite a URL to use the current domain
+     * 
+     * @param {string} url - The URL to rewrite
+     * @returns {string} - The rewritten URL
+     */
+    rewriteUrlToCurrentDomain(url) {
+        if (!url) return url;
+        
+        try {
+            // Create an anchor element to parse the URL
+            const parser = document.createElement('a');
+            parser.href = url;
+            
+            // Extract the path from the original URL
+            const path = parser.pathname + parser.search + parser.hash;
+            
+            // Create a new URL with the current domain and the original path
+            return `${this.currentDomain}${path}`;
+        } catch (e) {
+            console.error('Error rewriting URL:', e);
+            return url;
+        }
+    }
+
+    /**
+     * Check if a URL is cross-domain
+     * 
+     * @param {string} url - The URL to check
+     * @returns {boolean} - True if the URL is cross-domain
+     */
+    isCrossDomainUrl(url) {
+        if (!url) return false;
+        
+        try {
+            // Create an anchor element to parse the URL
+            const parser = document.createElement('a');
+            parser.href = url;
+            
+            // Check if the domain is different from the current domain
+            return parser.hostname !== window.location.hostname;
+        } catch (e) {
+            console.error('Error checking cross-domain URL:', e);
+            return true; // Assume cross-domain on error to be safe
+        }
+    }
+
+    /**
+     * Get form data as an object
+     * 
+     * @param {HTMLFormElement} form - The form element
+     * @returns {Object} - The form data as an object
+     */
+    getFormData(form) {
+        // Create a FormData object
+        const formData = new FormData(form);
+        
+        // Convert FormData to a plain object
+        const formDataObj = {};
+        for (const pair of formData.entries()) {
+            formDataObj[pair[0]] = pair[1];
+        }
+        
+        return formDataObj;
+    }
+
+    /**
+     * Close the modal
+     */
+    closeModal() {
+        if (this.isInIframe) {
+            window.parent.postMessage({
+                type: 'toggleModal',
+                visible: false,
+                modalId: this.options.modalId
+            }, '*');
+        } else if (this.hasLocalModal) {
+            this.toggleLocalModal(false);
+        }
+    }
+
+    /**
+     * Set up a message listener for communication with the parent window
+     */
+    setupMessageListener() {
+        const self = this;
+        
+        window.addEventListener('message', function(event) {
+            // Check if the message is for this widget
+            if (!event.data || !event.data.type) return;
+            
+            // Handle different message types
+            switch (event.data.type) {
+                case 'modalClosed':
+                    // Check if the closed modal is this widget's modal
+                    if (event.data.modalId === self.options.modalId) {
+                        // Call the onClose callback if provided
+                        if (typeof self.options.onClose === 'function') {
+                            self.options.onClose();
+                        }
+                    }
+                    break;
+                    
+                case 'requestHeight':
+                    // This is a request from the parent window to send the height of this document
+                    // This is used for auto-resizing iframe #1 (the initial iframe)
+                    try {
+                        // Get the document height
+                        const height = document.body.scrollHeight || document.documentElement.scrollHeight;
+                        
+                        // Send the height back to the parent
+                        window.parent.postMessage({
+                            type: 'resize',
+                            height: height
+                        }, '*');
+                        
+                        // Set up a MutationObserver to watch for content changes and send height updates
+                        if (!window.s123ResizeObserver) {
+                            const observer = new MutationObserver(function(mutations) {
+                                /**
+                                 * IMPORTANT: Do not remove this setTimeout - This setTimeout is used to defer DOM 
+                                 * mutations or event triggers to the next event loop tick. Without this, making DOM 
+                                 * changes inside a ResizeObserver or MutationObserver callback can cause a feedback 
+                                 * loop, resulting in the "ResizeObserver loop completed with undelivered notifications" 
+                                 * error. Deferring the changes ensures the browser can finish its observer cycle cleanly 
+                                 * and prevents this error.
+                                 */
+                                setTimeout(function() {
+                                    const newHeight = document.body.scrollHeight || document.documentElement.scrollHeight;
+                                    window.parent.postMessage({
+                                        type: 'resize',
+                                        height: newHeight
+                                    }, '*');
+                                },0);
+                            });
+                            
+                            // Start observing the document body for changes
+                            observer.observe(document.body, {
+                                childList: true,
+                                subtree: true,
+                                attributes: true
+                            });
+                            
+                            // Also send height on window resize
+                            window.addEventListener('resize', function() {
+                                /**
+                                 * IMPORTANT: Do not remove this setTimeout - This setTimeout is used to defer DOM 
+                                 * mutations or event triggers to the next event loop tick. Without this, making DOM 
+                                 * changes inside a ResizeObserver or MutationObserver callback can cause a feedback 
+                                 * loop, resulting in the "ResizeObserver loop completed with undelivered notifications" 
+                                 * error. Deferring the changes ensures the browser can finish its observer cycle cleanly 
+                                 * and prevents this error.
+                                 */
+                                setTimeout(function() {
+                                    const newHeight = document.body.scrollHeight || document.documentElement.scrollHeight;
+                                    window.parent.postMessage({
+                                        type: 'resize',
+                                        height: newHeight
+                                    }, '*');
+                                },0);
+                            });
+                            
+                            // Mark that we've set up the observer
+                            window.s123ResizeObserver = observer;
+                        }
+                    } catch (e) {
+                        console.error('Error sending height to parent:', e);
+                    }
+                    break;
+            }
+        });
+    }
+}
+
+// Export the class for use in other modules
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = WebsitesEmbedWidget;
+} 
+
+/**
+ * Global function to handle iframe resizing
+ * This function should be called from the embedded content to enable auto-resizing
+ */
+function initIframeResizer() {
+    // Only run in iframe context
+    if (window.self === window.top) return;
+    
+    // Track resize attempts and last height
+    let resizeAttempts = 0;
+    const MAX_RESIZE_ATTEMPTS = 3;
+    let lastHeight = 0;
+    let resizeTimeout = null;
+    let initialResizeDone = false;
+    
+    // Function to send height to parent
+    function sendHeightToParent() {
+        // Allow unlimited attempts for the initial resize
+        if (initialResizeDone && resizeAttempts >= MAX_RESIZE_ATTEMPTS) {
+            return;
+        }
+        
+        // Get content height - try multiple methods for reliability
+        const bodyHeight = Math.max(
+            document.body.offsetHeight,
+            document.body.scrollHeight,
+            document.documentElement.offsetHeight,
+            document.documentElement.scrollHeight
+        );
+        
+        // Add a small buffer for padding and margins
+        const heightWithBuffer = bodyHeight + 20;
+        
+        // Only send if height has changed significantly or it's the initial resize
+        if (!initialResizeDone || Math.abs(heightWithBuffer - lastHeight) > 10) {
+            lastHeight = heightWithBuffer;
+            
+            // Only increment attempts after initial resize
+            if (initialResizeDone) {
+                resizeAttempts++;
+            } else {
+                initialResizeDone = true;
+            }
+            
+            window.parent.postMessage({ 
+                type: 'resize',
+                height: heightWithBuffer
+            }, '*');
+        }
+    }
+    
+    // Debounced version of sendHeightToParent
+    function debouncedSendHeight() {
+        if (resizeTimeout) {
+            clearTimeout(resizeTimeout);
+        }
+        resizeTimeout = setTimeout(sendHeightToParent, 100);
+    }
+    
+    // Send height on load with a delay to ensure content is rendered
+    window.addEventListener('load', function() {
+        // Reset for load event
+        initialResizeDone = false;
+        resizeAttempts = 0;
+        
+        // First attempt after a short delay
+        setTimeout(function() {
+            sendHeightToParent();
+            
+            // Second attempt after content has likely settled
+            setTimeout(sendHeightToParent, 500);
+        }, 300);
+    });
+    
+    // Set up a MutationObserver to watch for content changes
+    if (!window.s123ResizeObserver) {
+        const observer = new MutationObserver(function(mutations) {
+            // Only process significant DOM changes
+            const significantChange = mutations.some(function(mutation) {
+                // Check for added/removed nodes
+                if (mutation.type === 'childList' && 
+                    (mutation.addedNodes.length > 0 || mutation.removedNodes.length > 0)) {
+                    return true;
+                }
+                
+                // Check for style/class changes on large elements
+                if (mutation.type === 'attributes' && 
+                    (mutation.attributeName === 'style' || mutation.attributeName === 'class')) {
+                    const target = mutation.target;
+                    if (target.offsetHeight > 30) {
+                        return true;
+                    }
+                }
+                
+                return false;
+            });
+            
+            if (significantChange) {
+                // Reset attempts for significant content changes
+                resizeAttempts = 0;
+                /**
+                 * IMPORTANT: Do not remove this setTimeout - This setTimeout is used to defer DOM 
+                 * mutations or event triggers to the next event loop tick. Without this, making DOM 
+                 * changes inside a ResizeObserver or MutationObserver callback can cause a feedback 
+                 * loop, resulting in the "ResizeObserver loop completed with undelivered notifications" 
+                 * error. Deferring the changes ensures the browser can finish its observer cycle cleanly 
+                 * and prevents this error.
+                 */
+                setTimeout(debouncedSendHeight,0);
+            }
+        });
+        
+        // Start observing the document body
+        observer.observe(document.body, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['style', 'class', 'hidden']
+        });
+        
+        // Also handle window resize events
+        window.addEventListener('resize', function() {
+            // reset attempts for window resize
+            resizeAttempts = 0;
+            /**
+             * IMPORTANT: Do not remove this setTimeout - This setTimeout is used to defer DOM 
+             * mutations or event triggers to the next event loop tick. Without this, making DOM 
+             * changes inside a ResizeObserver or MutationObserver callback can cause a feedback 
+             * loop, resulting in the "ResizeObserver loop completed with undelivered notifications" 
+             * error. Deferring the changes ensures the browser can finish its observer cycle cleanly 
+             * and prevents this error.
+             */
+            setTimeout(debouncedSendHeight,0);
+        });
+        
+        // Listen for requestHeight messages from parent
+        window.addEventListener('message', function(event) {
+            if (event.data && event.data.type === 'requestHeight') {
+                // Reset for explicit height requests
+                initialResizeDone = false;
+                resizeAttempts = 0;
+                sendHeightToParent();
+            }
+        });
+        
+        // Store the observer to prevent multiple initialization
+        window.s123ResizeObserver = observer;
+    }
+    
+    // If document is already loaded, send height immediately
+    if (document.readyState === 'complete') {
+        // Reset for immediate measurement
+        initialResizeDone = false;
+        resizeAttempts = 0;
+        
+        // First attempt after a short delay
+        setTimeout(function() {
+            sendHeightToParent();
+            
+            // Second attempt after content has likely settled
+            setTimeout(sendHeightToParent, 500);
+        }, 300);
+    }
+}
+
+// Auto-initialize if the URL contains autoResize=true
+if (window.location.href.indexOf('autoResize=true') !== -1) {
+    // Wait for the document to be fully loaded
+    if (document.readyState === 'complete') {
+        initIframeResizer();
+    } else {
+        window.addEventListener('load', initIframeResizer);
+    }
+} 
